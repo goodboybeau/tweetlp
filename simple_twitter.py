@@ -10,13 +10,8 @@ set up the rest
 """
 from twitter import *
 import json
-
+from twitter_oath import *
 import sys, time
-
-OAUTH_TOKEN="2331234997-CqgYy3oQQHeQRMPn2vTnu6YMerxfsIcqY6FAT79"
-OAUTH_SECRET="Sn9uQtW7mnLt3qlv7kZyuzSfZ0QgqcHw6mrCsR7z8s0ve"
-CONSUMER_KEY="YXETsoXQHwmAiTAEATs8wA"
-CONSUMER_SECRET="EbShWrfFxfsCkLHCWp5DO64djbKLResDdm6pv5M9s"
 
 def get_stream():
 	stream = TwitterStream(auth=OAuth(OAUTH_TOKEN, OAUTH_SECRET, 
