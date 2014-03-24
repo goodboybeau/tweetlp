@@ -12,7 +12,10 @@ global MONGO_CLIENT
 MONGO_CLIENT = MyMongoClient()
 '''
 #OAuth Stuff
-from twitter_oath import *
+OAUTH_TOKEN="2331234997-CqgYy3oQQHeQRMPn2vTnu6YMerxfsIcqY6FAT79"
+OAUTH_SECRET="Sn9uQtW7mnLt3qlv7kZyuzSfZ0QgqcHw6mrCsR7z8s0ve"
+CONSUMER_KEY="YXETsoXQHwmAiTAEATs8wA"
+CONSUMER_SECRET="EbShWrfFxfsCkLHCWp5DO64djbKLResDdm6pv5M9s"
 
 global TWEETS_PER_FILE
 TWEETS_PER_FILE = 1000
@@ -77,9 +80,10 @@ class TweetPusher(threading.Thread):
 	def __init__(self, stream, down_addr, count=None, time=None):
 		if count is None and time is None:
 			print ("count and time is none in TweetPusher")
-		elif count is None:
-			self._time_limit = time
+			self._time_limit = 10
+			self._count_limit = 10
 		else:
+			self._time_limit = time
 			self._count_limit = count
 
 		threading.Thread.__init__(self)
@@ -117,30 +121,36 @@ class TweetPusher(threading.Thread):
 		TweetPusher.PAUSE_FLAG = True
 	
 	def run(self):
+		count = 0
 	 	start = time.time()
-		statuses = self._twitter_stream.statuses.sample()
-		while not TweetPusher.STOP_FLAG:
-			while not TweetPusher.PAUSE_FLAG:
-				count = 0
-				while time.time() - start < self._time_limit and count < 10:
-					try:
-						tweet = statuses.next()
-					except Exception as e:
-						print 'couldnt get next in pusher'
+		try:
+			statuses = self._twitter_stream.statuses.sample()
+			while not TweetPusher.STOP_FLAG:
+				while not TweetPusher.PAUSE_FLAG:
+					while time.time() - start < self._time_limit or count < self._count_limit:
 						try:
-							self._twitter_stream = get_stream()
-							statuses = self._twitter_stream.statuses.sample()
+							tweet = statuses.next()
 						except Exception as e:
-							print ('No stream available!')
-					else:
-						self._downstream_socket.send(json.dumps(tweet))
-						count += 1
+							print 'couldnt get next in pusher'
+							try:
+								self._twitter_stream = get_stream()
+								statuses = self._twitter_stream.statuses.sample()
+							except Exception as e:
+								print ('No stream available!')
+								SHUTDOWN()
+						else:
+							if FILTER_OUT_DELETE_TWEETS((tweet)):
+								self._downstream_socket.send(json.dumps(tweet))
+								count += 1
 					
-				if time.time() - start > self._time_limit:
-					TweetPusher.PAUSE_FLAG = True
-					TweetPusher.STOP_FLAG = True
-			time.sleep(1)
+					if time.time() - start > self._time_limit or count >= 10:
+						TweetPusher.PAUSE_FLAG = True
+						TweetPusher.STOP_FLAG = True
+				time.sleep(1)
+		except Exception as e:
+			print "Exception in TweetPusher:", str(e)
 
+		print "Pusher pushed %d tweets downstream" % count
 		TweetFilter.STOP_WHEN_READY = True
 
 PATH_TO_WRITE = '/home/ubuntu/usable_tweets/timelines/'
@@ -191,23 +201,28 @@ class TweetFilter(threading.Thread):
 		TweetFilter.PAUSE_FLAG = False
 
 	def run(self):
+		count = 0
 		start = time.time()
-		while not TweetFilter.STOP_FLAG:
-			non_blocking_socket = poll_socket(self._upstream_socket)
-			while not TweetFilter.PAUSE_FLAG:
-				tweet = non_blocking_socket.next()
-				if tweet is not None:
-					tweet = json.loads(tweet)
-					if self._filter(tweet):
-						self._downstream_socket.send(str(tweet['user']['screen_name']))
-				else:
-					if TweetFilter.STOP_WHEN_READY:
-						TweetConsumer.STOP_WHEN_READY = True
-						return
-					time.sleep(1)
+		try:
+			while not TweetFilter.STOP_FLAG:
+				non_blocking_socket = poll_socket(self._upstream_socket)
+				while not TweetFilter.PAUSE_FLAG:
+					tweet = non_blocking_socket.next()
+					if tweet is not None:
+						tweet = json.loads(tweet)
+						if self._filter(tweet):
+							self._downstream_socket.send(str(tweet['user']['screen_name']))
+							count += 1
+					else:
+						if TweetFilter.STOP_WHEN_READY:
+							TweetConsumer.STOP_WHEN_READY = True
+							TweetFilter.stop()
+						time.sleep(1)
+		except Exception as e:
+			print "Exception in TweetFilter:",str(e)
+		print "TweetFilter pushed %d tweets downstream" % count
+		#self._callback_when_done()
 
-			time.sleep(1)		
-	
 class TweetConsumer(threading.Thread):
 	
 	STOP_WHEN_READY = False
@@ -225,7 +240,7 @@ class TweetConsumer(threading.Thread):
 		
 		self._twitter		= get_twitter()
 	
-		print 'TweetConsumer created'
+		print 'TweetConsumer created binded to',self._upstream_addr
 	@staticmethod
 	def stop():
 		TweetConsumer.STOP_FLAG = True
@@ -244,28 +259,29 @@ class TweetConsumer(threading.Thread):
 		del self._location
 
 	def run(self):
-		count = 0
+		timeline_count = 0
+		tweet_count = 0
 		start = time.time()
-		while not TweetConsumer.STOP_FLAG:
-			non_blocking_socket = poll_socket(self._upstream_socket)
-			while not TweetConsumer.PAUSE_FLAG:
-				user = non_blocking_socket.next()
-				if user is not None:
-					FILENAME = PATH_TO_WRITE+user+'.twitter'
-					if not os.path.isfile(FILENAME):
-						with open(FILENAME,'w') as FILE:
-							for tweet in self._twitter.statuses.user_timeline(screen_name=user):
-								FILE.write(json.dumps(tweet)+'\n')				
-					count += 1
-				else:
-					if TweetConsumer.STOP_WHEN_READY:
-						TweetConsumer.PAUSE_FLAG = True
-						TweetConsumer.STOP_FLAG = True
-						print "\n\nconsumer received", count, "in %d seconds" %(time.time() -start)
-						return
-					time.sleep(1)
-
-			time.sleep(1)
+		try:
+			while not TweetConsumer.STOP_FLAG:
+				non_blocking_socket = poll_socket(self._upstream_socket)
+				while not TweetConsumer.PAUSE_FLAG:
+					user = non_blocking_socket.next()
+					if user is not None:
+						FILENAME = PATH_TO_WRITE+user+'.twitter'
+						if not os.path.isfile(FILENAME):
+							with open(FILENAME,'w') as FILE:
+								for tweet in self._twitter.statuses.user_timeline(screen_name=user, count = 200):
+									FILE.write(json.dumps(tweet)+'\n')
+									tweet_count += 1
+						timeline_count += 1
+					else:
+						if TweetConsumer.STOP_WHEN_READY:
+							TweetConsumer.stop()
+						time.sleep(1)
+		except Exception as e:
+			print "Exception in TweetConsumer:",str(e)
+		print "TweetConsumer wrote %d tweets from %d timelines in %d seconds" % (tweet_count, timeline_count, int(time.time()-start))
 
 def SHUTDOWN():
 	print "SHUTDOWN called!"
@@ -377,7 +393,7 @@ def collect_many(stream, COUNT):
 if __name__ == "__main__":
 	try:
 		# default time to run in seconds
-		TIME 		= 10
+		TIME 		= 30
 		if '-t' in sys.argv:
 			try:
 				TIME 	= int(sys.argv[sys.argv.index('-t')+1])
@@ -413,12 +429,14 @@ if __name__ == "__main__":
 		# writer push
 		WRITER_PUSH	= FileSaver(FILENAME)
 		
+		Collectors = []
 		# 1 collector for now
-		Collector 	= TweetPusher    (get_stream(),  COLLECTOR_PUSH, time = TIME)
+		Collector = TweetPusher    (get_stream(),  COLLECTOR_PUSH, time = TIME, count=100)
 		# many filters
 		Filters		= []
 		for x in range(NO_OF_FILTERS):
 			Filters.append(TweetFilter(FILTER_LISTEN, FILTER_PUSH, FILTER_ENGLISH_TWEETS))
+		
 		# one writer for now
 		Writer		= TweetConsumer (WRITER_LISTEN, WRITER_PUSH)
 		
